@@ -1,0 +1,15 @@
+[package]
+name = "dns-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+etherparse = "0.14.3"
+hickory-proto = "0.26.1"
+regex = "1.12.4"
+reqwest = { version = "0.12", features = ["blocking"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+# --- PERBAIKAN MUTLAK: Fitur Vendored ---
+# Memaksa Cargo untuk menyatukan C-Library (WinDivert.dll & .sys) secara otomatis
+windivert-sys = { version = "0.10.0", features = ["vendored"] }

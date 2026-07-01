@@ -1,0 +1,27 @@
+[package]
+name = "oktama-dns-filter"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "oktama_dns_filter"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+reqwest = { version = "0.12", features = ["blocking"] } # Klien HTTP untuk DoH
+hickory-proto = "0.26.1"      # Parser DNS
+etherparse = "0.14"           # Pembuat Header IP/UDP
+lazy_static = "1.4"           # (Opsional) Untuk caching state jika diperlukan
+
+# Memanggil mesin DNS buatan kita sendiri
+dns-core = { path = "./dns-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+[workspace]
+members = ["dns-core"]

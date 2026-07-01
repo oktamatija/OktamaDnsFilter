@@ -1,0 +1,390 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+
+interface AppConfig {
+  upstream_dns: string;
+  regex_rules: string[];
+  whitelist: string[];
+  cloud_blocklist: string[]; 
+  adult_blocklist: string[];
+  gambling_blocklist: string[];
+  doh_enabled: boolean;
+  filtering_enabled: boolean;
+  block_adult: boolean;
+  block_gambling: boolean;
+  language: string; // Properti Bahasa Baru
+}
+
+type DohStatus = "idle" | "checking" | "connected" | "error";
+
+// ==========================================
+// KAMUS MULTI-BAHASA (Pelokalan UI)
+// ==========================================
+const translations: Record<string, Record<string, string>> = {
+  id: {
+    title: "🛡️ Privacy Shield",
+    statusActive: "● Intersepsi Kernel Aktif",
+    statusIdle: "● Kernel Idle",
+    adBlocker: "Ad-Blocker",
+    dohTunnel: "DoH Tunnel",
+    dohProvider: "🌍 Penyedia DNS over HTTPS (DoH)",
+    dohSubtitle: "Pilih server selain Cloudflare jika diblokir oleh ISP Anda.",
+    checkingRoute: "⏳ Mengecek Rute...",
+    connected: "✅ Tersambung",
+    errorRoute: "❌ Gagal (Rute Diblokir)",
+    extraCategories: "☁️ Kategori Keamanan Ekstra",
+    adultContent: "🔞 Konten Dewasa",
+    gambling: "🎲 Perjudian",
+    totalActive: "Total Domain Aktif",
+    manualBlock: "🚫 Intersepsi Manual (Block)",
+    placeholderBlock: "contoh: ads, telemetry...",
+    whitelist: "✅ Pengecualian Blokir (Whitelist)",
+    placeholderWhitelist: "contoh: web-penting.com...",
+    btnUpdate: "🔄 Perbarui Daftar dari Cloud (GitHub)",
+    btnUpdating: "⏳ Mengunduh Jutaan Aturan Baru...",
+    connecting: "⚙️ Menghubungkan ke Mesin Kernel..."
+  },
+  en: {
+    title: "🛡️ Privacy Shield",
+    statusActive: "● Kernel Interception Active",
+    statusIdle: "● Kernel Idle",
+    adBlocker: "Ad-Blocker",
+    dohTunnel: "DoH Tunnel",
+    dohProvider: "🌍 DNS over HTTPS (DoH) Provider",
+    dohSubtitle: "Select a server other than Cloudflare if blocked by your ISP.",
+    checkingRoute: "⏳ Checking Route...",
+    connected: "✅ Connected",
+    errorRoute: "❌ Failed (Route Blocked)",
+    extraCategories: "☁️ Extra Security Categories",
+    adultContent: "🔞 Adult Content",
+    gambling: "🎲 Gambling",
+    totalActive: "Total Active Domains",
+    manualBlock: "🚫 Manual Interception (Block)",
+    placeholderBlock: "e.g., ads, telemetry...",
+    whitelist: "✅ Block Exception (Whitelist)",
+    placeholderWhitelist: "e.g., important-web.com...",
+    btnUpdate: "🔄 Update Lists from Cloud (GitHub)",
+    btnUpdating: "⏳ Downloading Millions of Rules...",
+    connecting: "⚙️ Connecting to Kernel Engine..."
+  }
+};
+
+export default function App() {
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [newRule, setNewRule] = useState("");
+  const [newWhitelist, setNewWhitelist] = useState("");
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [dohStatus, setDohStatus] = useState<DohStatus>("idle");
+
+  // Fungsi translasi pembantu yang adaptif
+  const t = (key: string): string => {
+    const lang = config?.language || "id";
+    return translations[lang]?.[key] || translations["id"][key] || key;
+  };
+
+  const verifyDohConnection = async (url: string) => {
+    setDohStatus("checking");
+    try {
+      await invoke("check_doh_connection", { url });
+      setDohStatus("connected");
+    } catch (error) {
+      console.error("DoH Connection Error:", error);
+      setDohStatus("error");
+    }
+  };
+
+  useEffect(() => {
+    invoke<AppConfig>("get_configuration")
+      .then((data) => {
+        if (!data.whitelist) data.whitelist = [];
+        if (!data.cloud_blocklist) data.cloud_blocklist = [];
+        if (!data.adult_blocklist) data.adult_blocklist = [];
+        if (!data.gambling_blocklist) data.gambling_blocklist = [];
+        
+        if (typeof data.doh_enabled === 'undefined') data.doh_enabled = false;
+        if (typeof data.filtering_enabled === 'undefined') data.filtering_enabled = false;
+        if (typeof data.block_adult === 'undefined') data.block_adult = false;
+        if (typeof data.block_gambling === 'undefined') data.block_gambling = false;
+        if (!data.language) data.language = "id";
+        if (!data.upstream_dns) data.upstream_dns = "https://cloudflare-dns.com/dns-query";
+        
+        setConfig(data);
+        
+        if (data.doh_enabled) {
+          verifyDohConnection(data.upstream_dns);
+        }
+      })
+      .catch((err) => console.error("Gagal memuat konfigurasi:", err));
+  }, []);
+
+  useEffect(() => {
+    const adjustWindowSize = async () => {
+      if (!config) return;
+      setTimeout(async () => {
+        try {
+          const appWindow = getCurrentWindow();
+          const contentHeight = document.documentElement.scrollHeight;
+          await appWindow.setSize(new LogicalSize(900, contentHeight + 20));
+        } catch (error) {
+          console.log("Auto-resize memerlukan plugin window aktif.", error);
+        }
+      }, 100);
+    };
+    adjustWindowSize();
+  }, [config, isUpdating]);
+
+  const saveAndApplyState = async (newConfig: AppConfig, triggerDohCheck = false) => {
+    setConfig(newConfig);
+    try {
+      await invoke("update_configuration", { newConfig });
+      await invoke("apply_engine_state");
+
+      if (triggerDohCheck && newConfig.doh_enabled) {
+        verifyDohConnection(newConfig.upstream_dns);
+      } else if (!newConfig.doh_enabled) {
+        setDohStatus("idle");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const toggleDoH = () => {
+    if (config) saveAndApplyState({ ...config, doh_enabled: !config.doh_enabled }, true);
+  };
+
+  const toggleFiltering = () => {
+    if (config) saveAndApplyState({ ...config, filtering_enabled: !config.filtering_enabled });
+  };
+
+  const handleDohServerChange = (newUrl: string) => {
+    if (config) saveAndApplyState({ ...config, upstream_dns: newUrl }, true);
+  };
+
+  // Fungsi pengubah bahasa dari UI
+  const handleLanguageChange = (lang: "id" | "en") => {
+    if (config) saveAndApplyState({ ...config, language: lang }, config.doh_enabled);
+  };
+
+  const handleUpdateList = async () => {
+    setIsUpdating(true);
+    try {
+      const msg = await invoke<string>("update_blocklist_from_github");
+      // Mengubah pesan alert sesuai bahasa terpilih
+      const successMsg = config?.language === "en" 
+        ? "✅ Cloud synchronization successful!" 
+        : msg;
+      alert(successMsg);
+      const data = await invoke<AppConfig>("get_configuration");
+      setConfig(data);
+    } catch (err) {
+      alert("❌ Error: " + err);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleAddRule = () => {
+    if (newRule.trim() && config) {
+      saveAndApplyState({ ...config, regex_rules: [...config.regex_rules, newRule.trim().toLowerCase()] });
+      setNewRule("");
+    }
+  };
+
+  const handleRemoveRule = (indexToRemove: number) => {
+    if (config) {
+      const updatedRules = config.regex_rules.filter((_, idx) => idx !== indexToRemove);
+      saveAndApplyState({ ...config, regex_rules: updatedRules });
+    }
+  };
+
+  const handleAddWhitelist = () => {
+    if (newWhitelist.trim() && config) {
+      saveAndApplyState({ ...config, whitelist: [...config.whitelist, newWhitelist.trim().toLowerCase()] });
+      setNewWhitelist("");
+    }
+  };
+
+  const handleRemoveWhitelist = (indexToRemove: number) => {
+    if (config) {
+      const updatedWhitelist = config.whitelist.filter((_, idx) => idx !== indexToRemove);
+      saveAndApplyState({ ...config, whitelist: updatedWhitelist });
+    }
+  };
+
+  if (!config) return <div style={{ padding: "40px", textAlign: "center", color: "#888", fontFamily: "system-ui" }}>{t("connecting")}</div>;
+
+  const isEngineActive = config.doh_enabled || config.filtering_enabled;
+  
+  const totalBlocked = config.cloud_blocklist.length 
+                     + (config.block_adult ? config.adult_blocklist.length : 0) 
+                     + (config.block_gambling ? config.gambling_blocklist.length : 0);
+
+  return (
+    <div style={{ backgroundColor: "#121212", minHeight: "100vh", color: "#e0e0e0", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+      
+      {/* HEADER & GLOBAL TOGGLES */}
+      <div style={{ backgroundColor: "#1e1e1e", padding: "20px 30px", borderBottom: "1px solid #2d2d2d", display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, zIndex: 10 }}>
+        <div>
+          <h2 style={{ margin: 0, color: "#3b82f6", display: "flex", alignItems: "center", gap: "10px" }}>
+            {t("title")}
+          </h2>
+          <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: isEngineActive ? "#10b981" : "#64748b", fontWeight: "500" }}>
+            {isEngineActive ? t("statusActive") : t("statusIdle")}
+          </p>
+        </div>
+
+        <div style={{ display: "flex", gap: "25px", alignItems: "center" }}>
+          <label onClick={toggleFiltering} style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+            <span style={{ fontSize: '14px', fontWeight: 600, color: config.filtering_enabled ? '#f59e0b' : '#666', transition: '0.3s' }}>{t("adBlocker")}</span>
+            <div style={{ position: 'relative', width: '36px', height: '20px', backgroundColor: config.filtering_enabled ? '#f59e0b' : '#333', borderRadius: '20px', transition: '0.3s' }}>
+               <div style={{ position: 'absolute', top: '2px', left: config.filtering_enabled ? '18px' : '2px', width: '16px', height: '16px', backgroundColor: '#fff', borderRadius: '50%', transition: '0.3s' }} />
+            </div>
+          </label>
+
+          <label onClick={toggleDoH} style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+            <span style={{ fontSize: '14px', fontWeight: 600, color: config.doh_enabled ? '#3b82f6' : '#666', transition: '0.3s' }}>{t("dohTunnel")}</span>
+            <div style={{ position: 'relative', width: '36px', height: '20px', backgroundColor: config.doh_enabled ? '#3b82f6' : '#333', borderRadius: '20px', transition: '0.3s' }}>
+               <div style={{ position: 'absolute', top: '2px', left: config.doh_enabled ? '18px' : '2px', width: '16px', height: '16px', backgroundColor: '#fff', borderRadius: '50%', transition: '0.3s' }} />
+            </div>
+          </label>
+
+          {/* --- FITUR BARU: TOMBOL PILIHAN BAHASA (ID / EN) --- */}
+          <div style={{ display: "flex", backgroundColor: "#0f0f0f", padding: "4px", borderRadius: "20px", border: "1px solid #333", marginLeft: "10px" }}>
+            <button onClick={() => handleLanguageChange("id")} style={{ border: "none", background: config.language === "id" ? "#3b82f6" : "none", color: config.language === "id" ? "#fff" : "#666", padding: "4px 10px", borderRadius: "15px", fontSize: "11px", fontWeight: "bold", cursor: "pointer", transition: "0.2s", boxShadow: "none" }}>ID</button>
+            <button onClick={() => handleLanguageChange("en")} style={{ border: "none", background: config.language === "en" ? "#3b82f6" : "none", color: config.language === "en" ? "#fff" : "#666", padding: "4px 10px", borderRadius: "15px", fontSize: "11px", fontWeight: "bold", cursor: "pointer", transition: "0.2s", boxShadow: "none" }}>EN</button>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: "30px", maxWidth: "1000px", margin: "0 auto", paddingBottom: "50px" }}>
+        
+        {/* DROPDOWN SERVER DOH */}
+        <div style={{ marginBottom: "25px", padding: "20px", backgroundColor: "#1a1a1a", borderRadius: "10px", border: "1px solid #2d2d2d" }}>
+          <h3 style={{ margin: "0 0 10px 0", color: "#e0e0e0", fontSize: "15px", display: "flex", alignItems: "center", gap: "8px" }}>
+            {t("dohProvider")}
+            {config.doh_enabled && (
+              <span style={{ 
+                marginLeft: "auto", fontSize: "12px", padding: "4px 10px", borderRadius: "20px", fontWeight: "bold",
+                backgroundColor: dohStatus === "checking" ? "#f59e0b" : dohStatus === "connected" ? "#059669" : "#dc2626", 
+                color: "#fff", transition: "0.3s"
+              }}>
+                {dohStatus === "checking" ? t("checkingRoute") : dohStatus === "connected" ? t("connected") : t("errorRoute")}
+              </span>
+            )}
+          </h3>
+          <p style={{ margin: "0 0 15px 0", fontSize: "13px", color: "#888" }}>{t("dohSubtitle")}</p>
+          
+          <select 
+            value={config.upstream_dns}
+            onChange={(e) => handleDohServerChange(e.target.value)}
+            disabled={!config.doh_enabled}
+            style={{ width: "100%", padding: "12px", borderRadius: "6px", backgroundColor: config.doh_enabled ? "#0f0f0f" : "#1a1a1a", color: config.doh_enabled ? "#fff" : "#666", border: "1px solid #333", outline: "none", cursor: config.doh_enabled ? "pointer" : "not-allowed", fontSize: "14px", transition: "0.3s" }}
+          >
+            <option value="https://cloudflare-dns.com/dns-query">Cloudflare (1.1.1.1) - Tercepat & Populer</option>
+            <option value="https://dns.google/dns-query">Google DNS (8.8.8.8) - Paling Stabil di Indonesia</option>
+            <option value="https://dns.quad9.net/dns-query">Quad9 (9.9.9.9) - Fokus Privasi & Keamanan</option>
+          </select>
+        </div>
+
+        {/* PANEL KATEGORI & STATISTIK */}
+        <div style={{ marginBottom: "25px", padding: "20px", backgroundColor: "#1e293b", borderRadius: "10px", border: "1px solid #334155", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "20px" }}>
+          <div>
+            <h4 style={{ margin: "0 0 15px 0", color: "#f8fafc", fontSize: "16px" }}>{t("extraCategories")}</h4>
+            
+            <div style={{ display: "flex", gap: "20px" }}>
+              <label onClick={() => saveAndApplyState({ ...config, block_adult: !config.block_adult })} style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: config.filtering_enabled ? 'pointer' : 'not-allowed', opacity: config.filtering_enabled ? 1 : 0.5 }}>
+                <div style={{ position: 'relative', width: '36px', height: '20px', backgroundColor: config.block_adult ? '#ef4444' : '#333', borderRadius: '20px', transition: '0.3s' }}>
+                  <div style={{ position: 'absolute', top: '2px', left: config.block_adult ? '18px' : '2px', width: '16px', height: '16px', backgroundColor: '#fff', borderRadius: '50%', transition: '0.3s' }} />
+                </div>
+                <span style={{ fontSize: '13px', fontWeight: 600, color: config.block_adult ? '#fca5a5' : '#94a3b8', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {t("adultContent")}
+                  <span style={{ backgroundColor: config.block_adult ? 'rgba(239, 68, 68, 0.2)' : '#333', color: config.block_adult ? '#fca5a5' : '#888', padding: '2px 6px', borderRadius: '10px', fontSize: '10px', letterSpacing: '0.5px' }}>
+                    {config.adult_blocklist.length.toLocaleString("id-ID")}
+                  </span>
+                </span>
+              </label>
+
+              <label onClick={() => saveAndApplyState({ ...config, block_gambling: !config.block_gambling })} style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: config.filtering_enabled ? 'pointer' : 'not-allowed', opacity: config.filtering_enabled ? 1 : 0.5 }}>
+                <div style={{ position: 'relative', width: '36px', height: '20px', backgroundColor: config.block_gambling ? '#d946ef' : '#333', borderRadius: '20px', transition: '0.3s' }}>
+                  <div style={{ position: 'absolute', top: '2px', left: config.block_gambling ? '18px' : '2px', width: '16px', height: '16px', backgroundColor: '#fff', borderRadius: '50%', transition: '0.3s' }} />
+                </div>
+                <span style={{ fontSize: '13px', fontWeight: 600, color: config.block_gambling ? '#f0abfc' : '#94a3b8', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {t("gambling")}
+                  <span style={{ backgroundColor: config.block_gambling ? 'rgba(217, 70, 239, 0.2)' : '#333', color: config.block_gambling ? '#f0abfc' : '#888', padding: '2px 6px', borderRadius: '10px', fontSize: '10px', letterSpacing: '0.5px' }}>
+                    {config.gambling_blocklist.length.toLocaleString("id-ID")}
+                  </span>
+                </span>
+              </label>
+            </div>
+          </div>
+          
+          <div style={{ textAlign: "right", borderLeft: "1px solid #334155", paddingLeft: "20px" }}>
+            <div style={{ fontSize: "28px", fontWeight: "800", color: "#38bdf8", letterSpacing: "-0.5px" }}>
+              {totalBlocked.toLocaleString("id-ID")} 
+            </div>
+            <div style={{ fontSize: "12px", color: "#64748b", fontWeight: "bold", textTransform: "uppercase" }}>{t("totalActive")}</div>
+          </div>
+        </div>
+
+        {/* INPUT MANUAL & WHITELIST */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "25px" }}>
+          <div style={{ backgroundColor: "#1a1a1a", padding: "20px", borderRadius: "10px", border: "1px solid #2d2d2d", opacity: config.filtering_enabled ? 1 : 0.5, transition: '0.3s' }}>
+            <h3 style={{ margin: "0 0 15px 0", color: config.filtering_enabled ? "#f59e0b" : "#666", fontSize: "16px", display: "flex", alignItems: "center", gap: "8px", transition: '0.3s' }}>
+              {t("manualBlock")}
+            </h3>
+            <div style={{ display: "flex", gap: "10px", marginBottom: "20px" }}>
+              <input 
+                type="text" placeholder={t("placeholderBlock")} value={newRule} onChange={(e) => setNewRule(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleAddRule()}
+                disabled={!config.filtering_enabled}
+                style={{ flex: 1, padding: "10px 12px", borderRadius: "6px", border: "1px solid #333", backgroundColor: "#0f0f0f", color: "#fff", outline: "none" }}
+              />
+              <button onClick={handleAddRule} disabled={!config.filtering_enabled} style={{ padding: "0 16px", backgroundColor: config.filtering_enabled ? "#d97706" : "#444", color: "white", border: "none", borderRadius: "6px", cursor: config.filtering_enabled ? "pointer" : "not-allowed", fontWeight: "bold" }}>+</button>
+            </div>
+            
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", maxHeight: "300px", overflowY: "auto", paddingRight: "5px" }}>
+              {config.regex_rules.map((rule, idx) => (
+                <div key={idx} style={{ display: "flex", alignItems: "center", backgroundColor: config.filtering_enabled ? "#261706" : "#222", padding: "6px 12px", borderRadius: "20px", fontSize: "13px", border: config.filtering_enabled ? "1px solid #452605" : "1px solid #333" }}>
+                  <span style={{ marginRight: "10px", color: config.filtering_enabled ? "#fcd34d" : "#888" }}>{rule}</span>
+                  <button onClick={() => handleRemoveRule(idx)} disabled={!config.filtering_enabled} style={{ background: "none", border: "none", color: config.filtering_enabled ? "#ef4444" : "#666", cursor: "pointer", fontSize: "16px", padding: 0, lineHeight: 1 }}>&times;</button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ backgroundColor: "#1a1a1a", padding: "20px", borderRadius: "10px", border: "1px solid #2d2d2d", opacity: isEngineActive ? 1 : 0.5, transition: '0.3s' }}>
+            <h3 style={{ margin: "0 0 15px 0", color: isEngineActive ? "#10b981" : "#666", fontSize: "16px", display: "flex", alignItems: "center", gap: "8px", transition: '0.3s' }}>
+              {t("whitelist")}
+            </h3>
+            <div style={{ display: "flex", gap: "10px", marginBottom: "20px" }}>
+              <input 
+                type="text" placeholder={t("placeholderWhitelist")} value={newWhitelist} onChange={(e) => setNewWhitelist(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleAddWhitelist()}
+                disabled={!isEngineActive}
+                style={{ flex: 1, padding: "10px 12px", borderRadius: "6px", border: "1px solid #333", backgroundColor: "#0f0f0f", color: "#fff", outline: "none" }}
+              />
+              <button onClick={handleAddWhitelist} disabled={!isEngineActive} style={{ padding: "0 16px", backgroundColor: isEngineActive ? "#059669" : "#444", color: "white", border: "none", borderRadius: "6px", cursor: isEngineActive ? "pointer" : "not-allowed", fontWeight: "bold" }}>+</button>
+            </div>
+            
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", maxHeight: "300px", overflowY: "auto", paddingRight: "5px" }}>
+              {config.whitelist.map((domain, idx) => (
+                <div key={idx} style={{ display: "flex", alignItems: "center", backgroundColor: isEngineActive ? "#062618" : "#222", padding: "6px 12px", borderRadius: "20px", fontSize: "13px", border: isEngineActive ? "1px solid #05452a" : "1px solid #333" }}>
+                  <span style={{ marginRight: "10px", color: isEngineActive ? "#6ee7b7" : "#888" }}>{domain}</span>
+                  <button onClick={() => handleRemoveWhitelist(idx)} disabled={!isEngineActive} style={{ background: "none", border: "none", color: isEngineActive ? "#fff" : "#666", cursor: "pointer", fontSize: "16px", padding: 0, lineHeight: 1 }}>&times;</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* BUTTON UPDATE CLOUD */}
+        <div style={{ marginTop: "30px", display: "flex", gap: "15px" }}>
+          <button onClick={handleUpdateList} disabled={isUpdating} style={{ flex: 1, padding: "14px", backgroundColor: isUpdating ? "#1e293b" : "#2d2d2d", color: isUpdating ? "#64748b" : "#e0e0e0", border: "1px solid #444", borderRadius: "8px", fontWeight: "bold", fontSize: "14px", cursor: isUpdating ? "not-allowed" : "pointer", transition: "0.2s" }}>
+            {isUpdating ? t("btnUpdating") : t("btnUpdate")}
+          </button>
+        </div>
+
+      </div>
+    </div>
+  );
+}

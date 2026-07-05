@@ -13,15 +13,27 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
-reqwest = { version = "0.12", features = ["blocking"] } # Klien HTTP untuk DoH
-hickory-proto = "0.26.1"      # Parser DNS
-etherparse = "0.14"           # Pembuat Header IP/UDP
-lazy_static = "1.4"           # (Opsional) Untuk caching state jika diperlukan
-
-# Memanggil mesin DNS buatan kita sendiri
-dns-core = { path = "./dns-core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+dns-core = { path = "./dns-core" }
+
+# KITA TURUNKAN REQWEST KE VERSI 0.11 (Anti-Crash di Android)
+# DAN MENGGUNAKAN WEBPKI-ROOTS AGAR TIDAK DIBLOKIR SSL ANDROID
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
 
 [workspace]
 members = ["dns-core"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1.1"
+
+# =======================================================
+# OPTIMASI MODE RILIS (Ukuran File Ekstra Kecil)
+# =======================================================
+[profile.release]
+panic = "abort"        # Menghentikan aplikasi langsung saat crash tanpa traceback (hemat ruang)
+codegen-units = 1      # Memaksa kompilasi 1 thread agar hasil file lebih padat
+lto = true             # Link Time Optimization agresif
+opt-level = "s"        # Mengoptimalkan ukuran file (size) daripada kecepatan mentah
+strip = true           # Membuang semua jejak teks debug (Sangat penting!)

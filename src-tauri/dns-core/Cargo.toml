@@ -1,15 +1,33 @@
 [package]
 name = "dns-core"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
+[lib]
+name = "dns_core"
+crate-type = ["cdylib", "rlib"]
+
+# ----------------------------------------------------------------
+# DEPENDENSI GLOBAL (Windows & Android)
+# ----------------------------------------------------------------
 [dependencies]
 etherparse = "0.14.3"
 hickory-proto = "0.26.1"
 regex = "1.12.4"
-reqwest = { version = "0.12", features = ["blocking"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-# --- PERBAIKAN MUTLAK: Fitur Vendored ---
-# Memaksa Cargo untuk menyatukan C-Library (WinDivert.dll & .sys) secara otomatis
+lazy_static = "1.4"
+# PERBAIKAN: Gunakan rustls-tls-webpki-roots untuk mem-bundle sertifikat Root CA langsung ke aplikasi.
+# Ini mencegah "builder error" di lingkungan Android yang ketat.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
+# ----------------------------------------------------------------
+# DEPENDENSI KHUSUS TARGET WINDOWS ONLY
+# ----------------------------------------------------------------
+[target.'cfg(target_os = "windows")'.dependencies]
 windivert-sys = { version = "0.10.0", features = ["vendored"] }
+
+# ----------------------------------------------------------------
+# DEPENDENSI KHUSUS TARGET ANDROID ONLY
+# ----------------------------------------------------------------
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }

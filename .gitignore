@@ -13,15 +13,20 @@ lerna-debug.log*
 
 # --- 2. Frontend & Node Ecosystem ---
 node_modules
+.yarn
 dist
 dist-ssr
 *.local
 .env
 .env.*
 
-# --- 3. Rust & Tauri Ecosystem (CRITICAL) ---
+# --- 3. Rust, Tauri & Android Ecosystem (CRITICAL) ---
 # Mengabaikan folder hasil kompilasi Rust yang sangat besar
 /src-tauri/target/
+
+# Mengabaikan sampah kompilasi Android (Ukurannya bisa mencapai Gigabita!)
+src-tauri/gen/android/.gradle
+src-tauri/gen/android/app/build
 
 # Mengabaikan biner mentah WinDivert di folder libs agar tidak mengotori source tree
 /src-tauri/libs/WinDivert.dll

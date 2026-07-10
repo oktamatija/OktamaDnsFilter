@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    oktama_dns_filter_lib::run();
+oktama_dns_filter::run();
 }

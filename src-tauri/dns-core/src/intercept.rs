@@ -70,7 +70,9 @@ async fn run_worker_async(socket: tokio::net::UdpSocket, config_store: Arc<RwLoc
                             let mut domain_name = query.name().to_string();
                             if domain_name.ends_with('.') { domain_name.pop(); }
                             
-                            if crate::filter::is_blocked(&domain_name, &current_config) {
+// Kunci dan ambil daftar domain dari memori RAM
+let lists = std::sync::Arc::clone(&crate::storage::GLOBAL_BLOCKLISTS.read().unwrap());
+if crate::filter::is_blocked(&domain_name, &current_config, &lists) {
                                 is_ads = true;
                                 break;
                             }

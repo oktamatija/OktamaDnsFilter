@@ -17,9 +17,13 @@ regex = "1.12.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 lazy_static = "1.4"
+once_cell = "1.19"
 # PERBAIKAN: Gunakan rustls-tls-webpki-roots untuk mem-bundle sertifikat Root CA langsung ke aplikasi.
 # Ini mencegah "builder error" di lingkungan Android yang ketat.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
+# MENGGUNAKAN ASYNC: Menghapus "blocking" dan menambahkan "json" untuk performa lebih baik
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
+# Async runtime untuk operasi non-blocking
+tokio = { version = "1.35", features = ["full"] }
 # ----------------------------------------------------------------
 # DEPENDENSI KHUSUS TARGET WINDOWS ONLY
 # ----------------------------------------------------------------

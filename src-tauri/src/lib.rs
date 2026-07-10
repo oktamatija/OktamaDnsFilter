@@ -1,10 +1,17 @@
-use std::sync::{Arc, RwLock, OnceLock};
+// PREVENT CONSOLE WINDOW ON WINDOWS IN RELEASE
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 #[cfg(target_os = "android")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use tauri::Manager;
-use dns_core::storage::{AppConfig, load_config, save_config};
+use tauri::{Manager, AppHandle, Emitter};
+use dns_core::storage::AppConfig;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
+use futures_util::future::join_all;
 
 #[cfg(target_os = "android")]
 use jni::{JavaVM, JNIEnv};
@@ -17,14 +24,6 @@ static JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
 #[cfg(target_os = "android")]
 static MAIN_ACTIVITY: Mutex<Option<Arc<GlobalRef>>> = Mutex::new(None);
 
-// Brankas Baja Global
-static GLOBAL_CONFIG: OnceLock<Arc<RwLock<AppConfig>>> = OnceLock::new();
-
-pub fn get_global_config() -> Arc<RwLock<AppConfig>> {
-    GLOBAL_CONFIG.get_or_init(|| {
-        Arc::new(RwLock::new(load_config()))
-    }).clone()
-}
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
@@ -45,20 +44,11 @@ pub unsafe extern "system" fn Java_com_oktama_dnsfilter_MainActivity_initRustJni
     }
 
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(500)); 
-        
-        // 🌟 FIX FINAL: Simpan ke variabel `enabled` agar kunci (read guard)
-        // langsung dihancurkan saat bertemu titik koma (;). Lolos Borrow Checker!
+        std::thread::sleep(std::time::Duration::from_millis(1000)); 
         let should_enable = {
-            let config_arc = get_global_config();
-            let enabled = if let Ok(config) = config_arc.read() {
-                config.doh_enabled || config.filtering_enabled
-            } else {
-                false
-            };
-            enabled
+            let config_arc = dns_core::storage::GLOBAL_APP_CONFIG.read().unwrap();
+            config_arc.doh_enabled || config_arc.filtering_enabled
         }; 
-
         if should_enable {
             let _ = toggle_android_vpn(true);
         }
@@ -68,237 +58,196 @@ pub unsafe extern "system" fn Java_com_oktama_dnsfilter_MainActivity_initRustJni
 #[cfg(target_os = "android")]
 fn toggle_android_vpn(enable: bool) -> Result<(), String> {
     let vm = JAVA_VM.get().ok_or("Sistem Android belum terhubung ke Rust")?;
-    
     let activity_arc = {
         let guard = MAIN_ACTIVITY.lock().map_err(|_| "Gagal mengunci referensi UI")?;
         guard.as_ref().cloned().ok_or("Layar Android belum terdaftar")?
     };
-
-    let mut env = vm.attach_current_thread_permanently()
-        .map_err(|e| format!("Gagal attach thread: {}", e))?;
-
+    let mut env = vm.attach_current_thread_permanently().map_err(|e| format!("Gagal attach thread: {}", e))?;
     let result = env.call_method(
         activity_arc.as_ref(),
         "toggleVpnFromRust",
         "(Z)V",
         &[JValue::Bool(if enable { 1 } else { 0 })],
     );
-
     if env.exception_check().unwrap_or(false) {
         let _ = env.exception_clear();
-        return Err("JNI membuang Exception (Dibersihkan)".to_string());
+        return Err("JNI membuang Exception".to_string());
     }
-
     result.map_err(|e| format!("JNI Call Failed: {:?}", e))?;
     Ok(())
 }
 
 struct CleanupHandler;
-
 impl Drop for CleanupHandler {
     fn drop(&mut self) {
         #[cfg(target_os = "windows")]
-        {
-            dns_core::tunnel::stop_windivert_interface();
-        }
-        
-        println!("⚠️ UI ditutup. (Di Android, VPN tetap berjalan di latar belakang)");
+        { dns_core::tunnel::stop_windivert_interface(); }
     }
 }
 
 #[tauri::command]
 fn get_configuration() -> AppConfig {
-    let config_arc = get_global_config();
-    let config = config_arc.read().unwrap();
-    config.clone()
+    let config_arc = dns_core::storage::GLOBAL_APP_CONFIG.read().unwrap();
+    config_arc.as_ref().clone()
 }
 
 #[tauri::command]
 fn update_configuration(new_config: AppConfig) -> Result<(), String> {
-    let config_arc = get_global_config();
-    let mut config = config_arc.write().unwrap();
-    *config = new_config.clone();
-    save_config(&new_config).map_err(|e| e.to_string())?;
+    dns_core::storage::save_config(&new_config).map_err(|e| e.to_string())?;
+    dns_core::storage::reload_global_config(); 
     Ok(())
 }
 
 #[tauri::command]
 fn apply_engine_state() -> Result<String, String> {
-    let config_arc = get_global_config();
-    let config = config_arc.read().unwrap();
+    let should_enable = {
+        let config_arc = dns_core::storage::GLOBAL_APP_CONFIG.read().unwrap();
+        config_arc.doh_enabled || config_arc.filtering_enabled
+    };
     
-    if config.doh_enabled || config.filtering_enabled {
+    if should_enable {
         #[cfg(target_os = "windows")]
         {
-            let config_clone = Arc::clone(&config_arc);
-            std::thread::spawn(move || {
-                dns_core::tunnel::start_windivert_interface(config_clone);
-            });
+            let config = dns_core::storage::GLOBAL_APP_CONFIG.read().unwrap().as_ref().clone();
+            let config_store = std::sync::Arc::new(std::sync::RwLock::new(config));
+            std::thread::spawn(move || { dns_core::tunnel::start_windivert_interface(config_store); });
         }
-        
         #[cfg(target_os = "android")]
         {
-            if let Err(e) = toggle_android_vpn(true) {
-                eprintln!("⚠️ Gagal memanggil VPN: {}", e);
-            }
+            if let Err(e) = toggle_android_vpn(true) { eprintln!("⚠️ Gagal memanggil VPN: {}", e); }
+            std::thread::sleep(std::time::Duration::from_millis(1500));
         }
-
         Ok("⚙️ Mesin Intersepsi Aktif.".to_string())
     } else {
         #[cfg(target_os = "windows")]
-        {
-            dns_core::tunnel::stop_windivert_interface();
-        }
-        
+        { dns_core::tunnel::stop_windivert_interface(); }
         #[cfg(target_os = "android")]
         {
-            if let Err(e) = toggle_android_vpn(false) {
-                eprintln!("⚠️ Gagal mematikan VPN: {}", e);
-            }
+            if let Err(e) = toggle_android_vpn(false) { eprintln!("⚠️ Gagal mematikan VPN: {}", e); }
         }
-
         Ok("🛑 Mesin Intersepsi Mati.".to_string())
     }
+}
+
+fn build_raw_dns_query(domain: &str, id: u16) -> Vec<u8> {
+    let mut query = Vec::new();
+    query.extend_from_slice(&id.to_be_bytes()); 
+    query.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); 
+    for part in domain.split('.') {
+        query.push(part.len() as u8);
+        query.extend_from_slice(part.as_bytes());
+    }
+    query.extend_from_slice(&[0x00, 0x00, 0x01, 0x00, 0x01]); 
+    query
 }
 
 #[tauri::command]
 async fn check_doh_connection(url: String) -> Result<String, String> {
     let raw = url.trim().to_lowercase();
-    let safe_url = if raw.contains("1.1.1.1") || raw.contains("cloudflare") {
-        "https://cloudflare-dns.com/dns-query".to_string()
-    } else if raw.contains("8.8.8.8") || raw.contains("google") {
-        "https://dns.google/dns-query".to_string()
-    } else if raw.contains("9.9.9.9") || raw.contains("quad9") {
-        "https://dns.quad9.net/dns-query".to_string()
-    } else if raw.contains("adguard") || raw.contains("94.140") {
-        "https://dns.adguard-dns.com/dns-query".to_string()
-    } else if raw.is_empty() {
-        "https://cloudflare-dns.com/dns-query".to_string()
-    } else if !raw.starts_with("http") {
-        format!("https://{}", raw)
-    } else {
-        raw
-    };
+    let safe_url = if raw.contains("1.1.1.1") { "https://cloudflare-dns.com/dns-query".to_string() } else { raw };
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .resolve("cloudflare-dns.com", std::net::SocketAddr::from(([1, 0, 0, 1], 443)))
-        .resolve("dns.google", std::net::SocketAddr::from(([8, 8, 8, 8], 443)))
-        .resolve("dns.quad9.net", std::net::SocketAddr::from(([9, 9, 9, 9], 443)))
-        .resolve("dns.adguard-dns.com", std::net::SocketAddr::from(([94, 140, 14, 14], 443)))
-        .build()
-        .map_err(|e| e.to_string())?;
+        .build().map_err(|e| e.to_string())?;
 
-    match client.get(&safe_url).send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            if status.is_success() || status.as_u16() == 400 || status.as_u16() == 405 {
-                Ok("Tersambung".to_string())
-            } else {
-                Err(format!("Server merespons aneh: {}", status))
-            }
-        },
-        Err(e) => Err(format!("Gagal/Diblokir ISP: {}", e)),
+    let dns_query = build_raw_dns_query("google.com", rand::random::<u16>());
+    match client.post(&safe_url).header("Accept", "application/dns-message").header("Content-Type", "application/dns-message").body(dns_query).send().await {
+        Ok(resp) => if resp.status().is_success() { Ok("Tersambung".to_string()) } else { Err("Gagal".to_string()) },
+        Err(_) => Err("Gagal".to_string()),
     }
 }
 
-async fn fetch_and_parse_list(url: &str) -> Result<Vec<String>, String> {
-    let resp = reqwest::get(url).await.map_err(|e| format!("Gagal ambil {}: {}", url, e))?;
-    let text = resp.text().await.map_err(|e| e.to_string())?;
+#[derive(Clone, serde::Serialize)]
+struct ProgressPayload { category: String, percentage: f64 }
+static ACTIVE_DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
+
+async fn download_and_save_category(app: &tauri::AppHandle, url: &str, category: &str) -> Result<usize, String> {
+    while ACTIVE_DOWNLOADS.load(Ordering::SeqCst) >= 2 { thread::sleep(std::time::Duration::from_millis(100)); }
+    ACTIVE_DOWNLOADS.fetch_add(1, Ordering::SeqCst);
     
-    let mut domains = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+    let result = async {
+        let _ = app.emit("download_progress", ProgressPayload { category: category.to_string(), percentage: 10.0 });
+        let res = reqwest::Client::new().get(url).send().await.map_err(|e| format!("Koneksi terputus: {}", e))?;
+        if !res.status().is_success() { return Err("Ditolak".to_string()); }
+        let _ = app.emit("download_progress", ProgressPayload { category: category.to_string(), percentage: 40.0 });
         
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 && (parts[0] == "0.0.0.0" || parts[0] == "127.0.0.1") {
-            if parts[1] != "0.0.0.0" && parts[1] != "localhost" {
-                domains.push(parts[1].to_string());
+        let full_text = res.text().await.map_err(|e| e.to_string())?;
+        let _ = app.emit("download_progress", ProgressPayload { category: category.to_string(), percentage: 70.0 });
+        
+        let mut valid_domains = String::with_capacity(full_text.len());
+        let mut line_count = 0;
+        for line in full_text.lines() {
+            let parts: Vec<&str> = line.trim().split_whitespace().collect();
+            if parts.len() >= 2 && (parts[0] == "0.0.0.0" || parts[0] == "127.0.0.1") && parts[1] != "0.0.0.0" && parts[1] != "localhost" {
+                valid_domains.push_str(parts[1]); valid_domains.push('\n'); line_count += 1;
+            } else if parts.len() == 1 && !parts[0].starts_with('#') {
+                valid_domains.push_str(parts[0]); valid_domains.push('\n'); line_count += 1;
             }
-        } 
-        else if parts.len() == 1 {
-            domains.push(parts[0].to_string());
         }
-    }
-    Ok(domains)
+        
+        let mut path = app.path().app_local_data_dir().unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        path.push(format!("{}.txt", category));
+        File::create(&path).unwrap().write_all(valid_domains.as_bytes()).unwrap();
+        let _ = app.emit("download_progress", ProgressPayload { category: category.to_string(), percentage: 100.0 });
+        Ok(line_count)
+    }.await;
+    
+    ACTIVE_DOWNLOADS.fetch_sub(1, Ordering::SeqCst);
+    result
 }
 
 #[tauri::command]
-async fn update_blocklist_from_github() -> Result<String, String> {
-    let base_url = "https://raw.githubusercontent.com/oktamatija/oktamagenerator/main";
+async fn update_blocklist_from_github(app: AppHandle) -> Result<String, String> {
+    let base = "https://raw.githubusercontent.com/oktamatija/oktamagenerator/main";
+    let categories = [("ads", format!("{}/ads.txt", base)), ("adult", format!("{}/adult.txt", base)), ("gambling", format!("{}/gambling.txt", base)), ("malware", format!("{}/malware.txt", base)), ("phishing", format!("{}/phishing.txt", base)), ("drugs", format!("{}/drugs.txt", base)), ("violence", format!("{}/violence.txt", base)), ("scam", format!("{}/scam.txt", base))];
+    let mut total = 0;
     
-    let url_ads      = format!("{}/ads.txt", base_url);
-    let url_adult    = format!("{}/adult.txt", base_url);
-    let url_gambling = format!("{}/gambling.txt", base_url);
-    let url_malware  = format!("{}/malware.txt", base_url);
-    let url_phishing = format!("{}/phishing.txt", base_url);
-    let url_drugs    = format!("{}/drugs.txt", base_url);
-    let url_violence = format!("{}/violence.txt", base_url);
-    let url_scam     = format!("{}/scam.txt", base_url);
+    let mut i = 0;
+    while i < categories.len() {
+        let batch = &categories[i..(i + 2).min(categories.len())];
+        let futures = batch.iter().map(|(cat, url)| { let app = app.clone(); async move { download_and_save_category(&app, url, cat).await } });
+        for res in join_all(futures).await { if let Ok(c) = res { total += c; } }
+        i += 2;
+    }
+    dns_core::storage::reload_blocklists();
+    Ok(format!("✅ Mengunduh ~{} domain!", total))
+}
 
-    let ads_list      = fetch_and_parse_list(&url_ads).await.unwrap_or_default();
-    let adult_list    = fetch_and_parse_list(&url_adult).await.unwrap_or_default();
-    let gambling_list = fetch_and_parse_list(&url_gambling).await.unwrap_or_default();
-    let malware_list  = fetch_and_parse_list(&url_malware).await.unwrap_or_default();
-    let phishing_list = fetch_and_parse_list(&url_phishing).await.unwrap_or_default();
-    let drugs_list    = fetch_and_parse_list(&url_drugs).await.unwrap_or_default();
-    let violence_list = fetch_and_parse_list(&url_violence).await.unwrap_or_default();
-    let scam_list     = fetch_and_parse_list(&url_scam).await.unwrap_or_default();
-
-    let total_domains = ads_list.len() 
-        + adult_list.len() 
-        + gambling_list.len()
-        + malware_list.len()
-        + phishing_list.len()
-        + drugs_list.len()
-        + violence_list.len()
-        + scam_list.len();
-
-    let config_arc = get_global_config();
-    let mut config = config_arc.write().unwrap();
-    config.cloud_blocklist = ads_list;
-    config.adult_blocklist = adult_list;
-    config.gambling_blocklist = gambling_list;
-    config.malware_blocklist = malware_list;
-    config.phishing_blocklist = phishing_list;
-    config.drugs_blocklist = drugs_list;
-    config.violence_blocklist = violence_list;
-    config.scam_blocklist = scam_list;
-    
-    save_config(&config).map_err(|e| format!("Gagal menyimpan: {}", e))?;
-    
-    Ok(format!("✅ Berhasil menyinkronkan {} total domain!", total_domains.to_string().replace("\"", "")))
+#[tauri::command]
+fn get_blocklist_counts(app: tauri::AppHandle) -> std::collections::HashMap<String, usize> {
+    let mut counts = std::collections::HashMap::new();
+    if let Ok(dir) = app.path().app_local_data_dir() {
+        for cat in ["ads", "adult", "gambling", "malware", "phishing", "drugs", "violence", "scam"] {
+            let count = File::open(dir.join(format!("{}.txt", cat))).map(|f| BufReader::new(f).lines().count()).unwrap_or(0);
+            counts.insert(cat.to_string(), count);
+        }
+    }
+    counts
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _cleanup = CleanupHandler; 
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            if let Ok(app_dir) = app.path().app_data_dir() {
-                let _ = std::fs::create_dir_all(&app_dir);
-                let _ = std::env::set_current_dir(&app_dir);
-                
-                std::env::set_var("HOME", &app_dir);
-                std::env::set_var("XDG_CONFIG_HOME", &app_dir);
-                std::env::set_var("XDG_DATA_HOME", &app_dir);
-                std::env::set_var("XDG_CACHE_HOME", &app_dir);
+            if let Ok(dir) = app.path().app_local_data_dir() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::env::set_current_dir(&dir);
             }
-
-            let _ = get_global_config();
+            
+            // 🌟 MEMISAHKAN BEBAN KE BACKGROUND THREAD AGAR UI INSTAN
+            std::thread::spawn(|| {
+                // Menggunakan drop() agar Rust tahu kita sengaja "membuang" nilainya 
+                // setelah berhasil menyentuh variabel lazy_static
+                drop(dns_core::storage::GLOBAL_BLOCKLISTS.read().unwrap());
+            });
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            get_configuration, 
-            update_configuration, 
-            apply_engine_state, 
-            check_doh_connection, 
-            update_blocklist_from_github
-        ])
+        .invoke_handler(tauri::generate_handler![get_configuration, update_configuration, apply_engine_state, check_doh_connection, update_blocklist_from_github, get_blocklist_counts])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .expect("error");
 }

@@ -1,60 +1,46 @@
 package com.oktama.dnsfilter
 
+import android.app.Activity
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
-import androidx.activity.enableEdgeToEdge
 
+// 🌟 Format yang 100% benar dan bersih
 class MainActivity : TauriActivity() {
     
-    // RAHASIA BARU: Deklarasi jabat tangan ke Rust
-    external fun initRustJni()
+    private external fun initRustJni()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        
-        // Begitu aplikasi nyala, langsung serahkan "Kunci Rumah" (Context) ke Rust!
-        try {
-            initRustJni()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        System.loadLibrary("oktama_dns_filter")
+        initRustJni()
     }
 
-    // Fungsi ini dipanggil dari Rust (Tidak perlu dibikin rumit pakai statis lagi)
     fun toggleVpnFromRust(enable: Boolean) {
-        runOnUiThread {
-            if (enable) {
-                askVpnPermission()
+        if (enable) {
+            val intent = VpnService.prepare(this)
+            if (intent != null) {
+                startActivityForResult(intent, 1)
             } else {
-                val intent = Intent(this@MainActivity, VpnInterface::class.java)
-                stopService(intent)
+                startVpnService()
             }
-        }
-    }
-
-    private fun askVpnPermission() {
-        val vpnIntent = VpnService.prepare(this)
-        if (vpnIntent != null) {
-            @Suppress("DEPRECATION")
-            startActivityForResult(vpnIntent, 100)
         } else {
-            startVpnService()
+            val vpnIntent = Intent(this, OktamaVpnService::class.java)
+            vpnIntent.action = "STOP_VPN"
+            startService(vpnIntent)
         }
     }
 
-    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 100 && resultCode == RESULT_OK) {
+        if (requestCode == 1 && resultCode == Activity.RESULT_OK) {
             startVpnService()
         }
     }
 
     private fun startVpnService() {
-        val intent = Intent(this, VpnInterface::class.java)
-        startService(intent)
+        val vpnIntent = Intent(this, OktamaVpnService::class.java)
+        vpnIntent.action = "START_VPN"
+        startService(vpnIntent)
     }
 }

@@ -46,3 +46,6 @@ Thumbs.db
 
 # --- 5. OS Generated Files ---
 .target
+my-release-key.keystore
+
+my-release-key.keystore

@@ -16,10 +16,17 @@ tauri-build = { version = "2.0.0", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 dns-core = { path = "./dns-core" }
+rand = "0.8"
 
 # KITA TURUNKAN REQWEST KE VERSI 0.11 (Anti-Crash di Android)
 # DAN MENGGUNAKAN WEBPKI-ROOTS AGAR TIDAK DIBLOKIR SSL ANDROID
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
+# 🌟 FITUR "stream" DITAMBAHKAN AGAR BISA MENGUNDUH DATA LAPIS DEMI LAPIS KE NAND STORAGE
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
+
+# 🌟 PUSTAKA WAJIB UNTUK MEMPROSES STREAM DATA & SERIALISASI PROGRESS KE REACT
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [workspace]
 members = ["dns-core"]

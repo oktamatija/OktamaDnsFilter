@@ -16,28 +16,46 @@ val tauriProperties = Properties().apply {
 android {
     compileSdk = 36
     namespace = "com.oktama.dnsfilter"
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("../../../../my-release-key.keystore")
+            storePassword = "0k74m4"
+            keyAlias = "my-key-alias"
+            keyPassword = "0k74m4"
+        }
+    }
+
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.oktama.dnsfilter"
         minSdk = 24
         targetSdk = 36
-        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
-        versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "2").toInt()
+        versionName = tauriProperties.getProperty("tauri.android.versionName", "1.1")
     }
+
     buildTypes {
         getByName("debug") {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
-            packaging {                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
+            packaging {                
+                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
                 jniLibs.keepDebugSymbols.add("*/armeabi-v7a/*.so")
                 jniLibs.keepDebugSymbols.add("*/x86/*.so")
                 jniLibs.keepDebugSymbols.add("*/x86_64/*.so")
             }
         }
         getByName("release") {
+            // Diet kode dan Resource Android
             isMinifyEnabled = true
+            isShrinkResources = true 
+            
+            // Menggunakan tanda tangan Keystore Anda
+            signingConfig = signingConfigs.getByName("release")
+
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))

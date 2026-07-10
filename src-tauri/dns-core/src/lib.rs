@@ -18,11 +18,19 @@ pub mod storage;
 pub mod intercept;
 
 #[cfg(target_os = "windows")]
-pub mod tunnel; // <-- Dipindahkan ke sini agar Android tidak membacanya
+pub mod tunnel;
 
 #[cfg(target_os = "windows")]
 pub use intercept::start_dns_listener;
 
+use once_cell::sync::Lazy;
+
+// 🌟 MESIN ASINKRON GLOBAL (Solusi OOM & Panic)
+pub static TOKIO_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    tokio::runtime::Runtime::new().expect("Gagal membuat Tokio Runtime Global")
+});
+
 pub fn init_core_engine() {
-    // Inisialisasi engine global
+    // Memastikan Tokio Runtime menyala saat engine diinisialisasi pertama kali
+    let _ = &*TOKIO_RUNTIME;
 }

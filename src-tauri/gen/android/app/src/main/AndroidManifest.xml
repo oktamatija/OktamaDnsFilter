@@ -1,27 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    
-    <!-- Izin Standar -->
     <uses-permission android:name="android.permission.INTERNET" />
-
-    <!-- TAMBAHAN: Izin yang dibutuhkan untuk VPN dan Background Service -->
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
-    <!-- HANYA BOLEH ADA SATU TAG APPLICATION: Semua atribut digabung di sini -->
     <application
-        android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
-        android:supportsRtl="true"
         android:theme="@style/Theme.oktama_dns_filter"
-        android:usesCleartextTraffic="${usesCleartextTraffic}"
-        android:enableOnBackInvokedCallback="true">
+        android:usesCleartextTraffic="${usesCleartextTraffic}">
         
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
@@ -37,11 +25,11 @@
             </intent-filter>
         </activity>
 
-        <!-- TAMBAHAN: Deklarasi Layanan VPN Kita -->
-        <service
-            android:name=".VpnInterface"
+        <!-- 🌟 DEKLARASI SERVIS VPN DITAMBAHKAN DI SINI 🌟 -->
+        <service 
+            android:name=".OktamaVpnService" 
             android:permission="android.permission.BIND_VPN_SERVICE"
-            android:exported="true">
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
@@ -56,6 +44,5 @@
             android:name="android.support.FILE_PROVIDER_PATHS"
             android:resource="@xml/file_paths" />
         </provider>
-        
     </application>
 </manifest>

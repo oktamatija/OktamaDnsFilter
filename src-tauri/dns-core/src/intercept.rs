@@ -1,93 +1,97 @@
-use std::net::UdpSocket;
 use std::io;
 use std::sync::{Arc, RwLock};
 use hickory_proto::op::{Message, ResponseCode};
 use crate::storage::AppConfig;
+use reqwest::Client;
+use once_cell::sync::Lazy;
+
+static SHARED_HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("Gagal membuat HTTP client")
+});
 
 pub fn start_dns_listener(config_store: Arc<RwLock<AppConfig>>) -> io::Result<()> {
-    // 1. Siapkan soket IPv4
-    let socket_v4 = UdpSocket::bind("0.0.0.0:53")?;
+    // Kloning pointer konfigurasi untuk thread IPv4
+    let config_v4 = Arc::clone(&config_store);
     
-    println!("🛡️ DNS Ad-Blocker Core aktif!");
-    println!("✅ Mendengarkan di IPv4 (0.0.0.0:53)");
+    crate::TOKIO_RUNTIME.spawn(async move {
+        println!("🛡️ DNS Ad-Blocker Core aktif!");
+        
+        if let Ok(socket_v4) = tokio::net::UdpSocket::bind("0.0.0.0:53").await {
+            println!("✅ Mendengarkan di IPv4 (0.0.0.0:53)");
+            run_worker_async(socket_v4, config_v4).await;
+        }
+    });
 
-    // 2. Siapkan soket IPv6 di thread paralel (agar bisa berjalan bersamaan)
-    if let Ok(socket_v6) = UdpSocket::bind("[::]:53") {
-        println!("✅ Mendengarkan di IPv6 ([::]:53)\n");
-        let config_v6 = Arc::clone(&config_store);
-        std::thread::spawn(move || {
-            run_worker(socket_v6, config_v6);
-        });
-    } else {
-        println!("⚠️ IPv6 tidak tersedia di sistem ini.\n");
-    }
-
-    // 3. Jalankan IPv4 di thread utama
-    run_worker(socket_v4, config_store);
+    // Kloning pointer konfigurasi untuk thread IPv6
+    let config_v6 = Arc::clone(&config_store);
+    
+    crate::TOKIO_RUNTIME.spawn(async move {
+        if let Ok(socket_v6) = tokio::net::UdpSocket::bind("[::]:53").await {
+            println!("✅ Mendengarkan di IPv6 ([::]:53)\n");
+            run_worker_async(socket_v6, config_v6).await;
+        }
+    });
 
     Ok(())
 }
 
-// Fungsi pekerja (worker) untuk menangani lalu lintas DNS
-fn run_worker(socket: UdpSocket, config_store: Arc<RwLock<AppConfig>>) {
+fn get_dns_server_address(config: &AppConfig) -> String {
+    if config.doh_enabled {
+        config.upstream_dns.clone()
+    } else {
+        if let Some(first_dns) = config.isp_dns_servers.first() {
+            format!("{}:53", first_dns)
+        } else {
+            "8.8.8.8:53".to_string()
+        }
+    }
+}
+
+async fn run_worker_async(socket: tokio::net::UdpSocket, config_store: Arc<RwLock<AppConfig>>) {
     let mut buffer = [0u8; 512];
+    let shared_socket = Arc::new(socket);
 
     loop {
-        match socket.recv_from(&mut buffer) {
+        match shared_socket.recv_from(&mut buffer).await {
             Ok((size, source_addr)) => {
-                if let Ok(parsed_message) = Message::from_vec(&buffer[..size]) {
-                    
-                    let current_config = {
-                        config_store.read().unwrap().clone()
-                    };
+                let packet_data = buffer[..size].to_vec();
+                let cfg_store = Arc::clone(&config_store);
+                let socket_clone = Arc::clone(&shared_socket);
 
-                    let mut is_ads = false;
-                    for query in parsed_message.queries.iter() {
-                        let domain_name = query.name().to_string();
-                        let record_type = query.query_type(); 
+                tokio::spawn(async move {
+                    if let Ok(parsed_message) = Message::from_vec(&packet_data) {
+                        let current_config = cfg_store.read().unwrap().clone();
+                        let mut is_ads = false;
                         
-                        if crate::filter::is_blocked(&domain_name, &current_config) {
-                            println!("🚫 [DIBLOKIR] {} meminta: {}", source_addr, domain_name);
-                            is_ads = true;
-                            break;
+                        for query in parsed_message.queries.iter() {
+                            let mut domain_name = query.name().to_string();
+                            if domain_name.ends_with('.') { domain_name.pop(); }
+                            
+                            if crate::filter::is_blocked(&domain_name, &current_config) {
+                                is_ads = true;
+                                break;
+                            }
+                        }
+
+                        if is_ads {
+                            let mut response = Message::error_msg(parsed_message.id, parsed_message.op_code, ResponseCode::NXDomain);
+                            response.add_queries(parsed_message.queries.clone());
+                            if let Ok(response_bytes) = response.to_vec() {
+                                let _ = socket_clone.send_to(&response_bytes, source_addr).await;
+                            }
                         } else {
-                            println!("✅ [AMAN] Klien meminta: {} [{}]", domain_name, record_type);
-                        }
-                    }
-
-                    if is_ads {
-                        let mut response = Message::error_msg(
-                            parsed_message.id, 
-                            parsed_message.op_code, 
-                            ResponseCode::NXDomain
-                        );
-                        
-                        for q in parsed_message.queries.iter() {
-                            response.add_query(q.clone());
-                        }
-                        
-                        if let Ok(response_bytes) = response.to_vec() {
-                            let _ = socket.send_to(&response_bytes, source_addr);
-                        }
-                    } else {
-                        match crate::upstream::forward_query(&buffer[..size], &current_config.upstream_dns) {
-                            Ok(upstream_response) => {
-                                let _ = socket.send_to(&upstream_response, source_addr);
-                            }
-                            Err(e) => {
-                                eprintln!("⚠️ Gagal menghubungi upstream server: {}", e);
+                            let dns_server = get_dns_server_address(&current_config);
+                            if let Ok(upstream_response) = crate::upstream::forward_query(&packet_data, &dns_server, &SHARED_HTTP_CLIENT).await {
+                                let _ = socket_clone.send_to(&upstream_response, source_addr).await;
                             }
                         }
                     }
-                }
+                });
             }
-            Err(e) => {
-                // Abaikan error koneksi bawaan Windows yang tidak kritis
-                if e.raw_os_error() == Some(10054) {
-                    continue;
-                }
-                eprintln!("⚠️ Gagal membaca dari socket UDP: {}", e);
-            }
+            Err(_) => continue,
         }
     }
 }

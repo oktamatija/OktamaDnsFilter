@@ -1,0 +1,10 @@
+<!--
+    Input:
+        system/hardware/interfaces/suspend/aidl/default/android.system.suspend-service.xml
+-->
+<manifest version="9.0" type="framework">
+    <hal format="aidl">
+        <name>android.system.suspend</name>
+        <fqname>ISystemSuspend/default</fqname>
+    </hal>
+</manifest>

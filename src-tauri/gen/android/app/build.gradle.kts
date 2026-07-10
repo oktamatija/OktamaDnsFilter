@@ -50,8 +50,9 @@ android {
         }
         getByName("release") {
             // Diet kode dan Resource Android
-            isMinifyEnabled = true
-            isShrinkResources = true 
+            isMinifyEnabled = false
+            isShrinkResources = false
+         
             
             // Menggunakan tanda tangan Keystore Anda
             signingConfig = signingConfigs.getByName("release")

@@ -3,7 +3,6 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-
 #[cfg(target_os = "android")]
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -20,39 +19,21 @@ use jni::objects::{JObject, GlobalRef, JValue};
 
 #[cfg(target_os = "android")]
 static JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
-
 #[cfg(target_os = "android")]
 static MAIN_ACTIVITY: Mutex<Option<Arc<GlobalRef>>> = Mutex::new(None);
 
+// VARIABEL GLOBAL PENTING
+static ACTIVE_DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_oktama_dnsfilter_MainActivity_initRustJni<'local>(
-    env: JNIEnv<'local>, 
-    class: JObject<'local>,
+    env: JNIEnv<'local>, class: JObject<'local>,
 ) {
-    if JAVA_VM.get().is_none() {
-        if let Ok(vm) = env.get_java_vm() {
-            let _ = JAVA_VM.set(vm);
-        }
-    }
-    
+    if JAVA_VM.get().is_none() { if let Ok(vm) = env.get_java_vm() { let _ = JAVA_VM.set(vm); } }
     if let Ok(global_ref) = env.new_global_ref(&class) {
-        if let Ok(mut activity) = MAIN_ACTIVITY.lock() {
-            *activity = Some(Arc::new(global_ref));
-        }
+        if let Ok(mut activity) = MAIN_ACTIVITY.lock() { *activity = Some(Arc::new(global_ref)); }
     }
-
-    std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(1000)); 
-        let should_enable = {
-            let config_arc = dns_core::storage::GLOBAL_APP_CONFIG.read().unwrap();
-            config_arc.doh_enabled || config_arc.filtering_enabled
-        }; 
-        if should_enable {
-            let _ = toggle_android_vpn(true);
-        }
-    });
 }
 
 #[cfg(target_os = "android")]
@@ -64,9 +45,7 @@ fn toggle_android_vpn(enable: bool) -> Result<(), String> {
     };
     let mut env = vm.attach_current_thread_permanently().map_err(|e| format!("Gagal attach thread: {}", e))?;
     let result = env.call_method(
-        activity_arc.as_ref(),
-        "toggleVpnFromRust",
-        "(Z)V",
+        activity_arc.as_ref(), "toggleVpnFromRust", "(Z)V",
         &[JValue::Bool(if enable { 1 } else { 0 })],
     );
     if env.exception_check().unwrap_or(false) {
@@ -110,7 +89,15 @@ fn apply_engine_state() -> Result<String, String> {
         {
             let config = dns_core::storage::GLOBAL_APP_CONFIG.read().unwrap().as_ref().clone();
             let config_store = std::sync::Arc::new(std::sync::RwLock::new(config));
-            std::thread::spawn(move || { dns_core::tunnel::start_windivert_interface(config_store); });
+            std::thread::spawn(move || { 
+                println!("🚀 [DEBUG] MEMULAI THREAD WINDIVERT...");
+                match std::panic::catch_unwind(|| {
+                    dns_core::tunnel::start_windivert_interface(config_store);
+                }) {
+                    Ok(_) => println!("✅ [DEBUG] THREAD WINDIVERT BERJALAN!"),
+                    Err(e) => println!("❌ [DEBUG] THREAD WINDIVERT PANICKED: {:?}", e),
+                }
+            });
         }
         #[cfg(target_os = "android")]
         {
@@ -122,45 +109,14 @@ fn apply_engine_state() -> Result<String, String> {
         #[cfg(target_os = "windows")]
         { dns_core::tunnel::stop_windivert_interface(); }
         #[cfg(target_os = "android")]
-        {
-            if let Err(e) = toggle_android_vpn(false) { eprintln!("⚠️ Gagal mematikan VPN: {}", e); }
-        }
+        { if let Err(e) = toggle_android_vpn(false) { eprintln!("⚠️ Gagal mematikan VPN: {}", e); } }
         Ok("🛑 Mesin Intersepsi Mati.".to_string())
     }
 }
 
-fn build_raw_dns_query(domain: &str, id: u16) -> Vec<u8> {
-    let mut query = Vec::new();
-    query.extend_from_slice(&id.to_be_bytes()); 
-    query.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); 
-    for part in domain.split('.') {
-        query.push(part.len() as u8);
-        query.extend_from_slice(part.as_bytes());
-    }
-    query.extend_from_slice(&[0x00, 0x00, 0x01, 0x00, 0x01]); 
-    query
-}
-
-#[tauri::command]
-async fn check_doh_connection(url: String) -> Result<String, String> {
-    let raw = url.trim().to_lowercase();
-    let safe_url = if raw.contains("1.1.1.1") { "https://cloudflare-dns.com/dns-query".to_string() } else { raw };
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .resolve("cloudflare-dns.com", std::net::SocketAddr::from(([1, 0, 0, 1], 443)))
-        .build().map_err(|e| e.to_string())?;
-
-    let dns_query = build_raw_dns_query("google.com", rand::random::<u16>());
-    match client.post(&safe_url).header("Accept", "application/dns-message").header("Content-Type", "application/dns-message").body(dns_query).send().await {
-        Ok(resp) => if resp.status().is_success() { Ok("Tersambung".to_string()) } else { Err("Gagal".to_string()) },
-        Err(_) => Err("Gagal".to_string()),
-    }
-}
-
+// LOGIKA DOWNLOAD (DIPULIHKAN SEPENUHNYA)
 #[derive(Clone, serde::Serialize)]
 struct ProgressPayload { category: String, percentage: f64 }
-static ACTIVE_DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
 
 async fn download_and_save_category(app: &tauri::AppHandle, url: &str, category: &str) -> Result<usize, String> {
     while ACTIVE_DOWNLOADS.load(Ordering::SeqCst) >= 2 { thread::sleep(std::time::Duration::from_millis(100)); }
@@ -227,27 +183,49 @@ fn get_blocklist_counts(app: tauri::AppHandle) -> std::collections::HashMap<Stri
     counts
 }
 
+#[tauri::command]
+fn build_raw_dns_query(domain: &str, id: u16) -> Vec<u8> {
+    let mut query = Vec::new();
+    query.extend_from_slice(&id.to_be_bytes()); 
+    query.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); 
+    for part in domain.split('.') {
+        query.push(part.len() as u8);
+        query.extend_from_slice(part.as_bytes());
+    }
+    query.extend_from_slice(&[0x00, 0x00, 0x01, 0x00, 0x01]); 
+    query
+}
+
+#[tauri::command]
+async fn check_doh_connection(url: String) -> Result<String, String> {
+    let raw = url.trim().to_lowercase();
+    let safe_url = if raw.contains("1.1.1.1") { "https://cloudflare-dns.com/dns-query".to_string() } else { raw };
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).resolve("cloudflare-dns.com", std::net::SocketAddr::from(([1, 0, 0, 1], 443))).build().map_err(|e| e.to_string())?;
+    let dns_query = build_raw_dns_query("google.com", rand::random::<u16>());
+    match client.post(&safe_url).header("Accept", "application/dns-message").header("Content-Type", "application/dns-message").body(dns_query).send().await {
+        Ok(resp) => if resp.status().is_success() { Ok("Tersambung".to_string()) } else { Err("Gagal".to_string()) },
+        Err(_) => Err("Gagal".to_string()),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    std::panic::set_hook(Box::new(|info| { println!("😱 [FATAL ERROR / PANIC]: {:?}", info); }));
     let _cleanup = CleanupHandler; 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             if let Ok(dir) = app.path().app_local_data_dir() {
                 let _ = std::fs::create_dir_all(&dir);
-                let _ = std::env::set_current_dir(&dir);
+                #[cfg(target_os = "android")] { let _ = std::env::set_current_dir(&dir); }
             }
-            
-            // 🌟 MEMISAHKAN BEBAN KE BACKGROUND THREAD AGAR UI INSTAN
-            std::thread::spawn(|| {
-                // Menggunakan drop() agar Rust tahu kita sengaja "membuang" nilainya 
-                // setelah berhasil menyentuh variabel lazy_static
-                drop(dns_core::storage::GLOBAL_BLOCKLISTS.read().unwrap());
-            });
-
+            std::thread::spawn(|| { drop(dns_core::storage::GLOBAL_BLOCKLISTS.read().unwrap()); });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_configuration, update_configuration, apply_engine_state, check_doh_connection, update_blocklist_from_github, get_blocklist_counts])
+        .invoke_handler(tauri::generate_handler![
+            get_configuration, update_configuration, apply_engine_state, 
+            check_doh_connection, update_blocklist_from_github, get_blocklist_counts
+        ])
         .run(tauri::generate_context!())
         .expect("error");
 }
